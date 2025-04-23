@@ -2,7 +2,8 @@ from flask import Flask
 from app.config import Config
 from app.extensions import cors #db, migrate,
 from app.errors import register_error_handlers
-from app.routes.rag import rag_bp
+from app.routes.vectordb import vectordb_bp
+from app.routes.chat import chat_bp
 
 def create_app(config_class=Config):
     app = Flask(__name__)
@@ -14,7 +15,8 @@ def create_app(config_class=Config):
     cors.init_app(app)
 
     # Register blueprints & error handlers
-    app.register_blueprint(rag_bp, url_prefix='/api/items')
+    app.register_blueprint(vectordb_bp, url_prefix='/api/vectordb')
+    app.register_blueprint(chat_bp,url_prefix='/api/chat')
     register_error_handlers(app)
-
+    
     return app
