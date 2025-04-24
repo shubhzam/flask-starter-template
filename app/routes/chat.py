@@ -8,16 +8,20 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.retrievers.multi_query import MultiQueryRetriever
-
+from app.models import ConversationHistory
+from app.extensions import db
+from datetime import datetime
 load_dotenv()
 
 embeddings = HuggingFaceEmbeddings(
     model_name="intfloat/e5-large-v2",
-    model_kwargs={"device": "cuda"}
+    model_kwargs={"device": "cuda"},
+    encode_kwargs={"normalize_embeddings":True}
 )
-llm = OllamaLLM(model="llama3.2-vision:latest",
+llm = OllamaLLM(model="gemma3:12b",
                 n_predict=1024,
-                temperature=0.1 
+                temperature=0.1,
+                keep_alive='-1' 
                 )
 
 PROMPT_TEMPLATE = """
@@ -25,7 +29,7 @@ You are an AI assistant that provides accurate answers **only** from the provide
 If the answer is not present, reply "I don't know." **(do not hallucinate).**
 
 ➤ **Write the answer directly** – no preambles like "Based on the context" and no meta commentary.
-➤ **Be comprehensive**: include every relevant detail that appears in the context.
+➤ **Be comprehensive**: paraphrase and include every relevant detail that appears in the context.
 ➤ Do **not** add information that is not explicitly in the context.
 
 Context:
@@ -39,9 +43,45 @@ prompt = PromptTemplate(
     input_variables=["context", "question"],
 )
 
-
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./_chromadb")
 chat_bp = Blueprint('chat', __name__)
+
+vectordb = None
+def get_vectordb():
+    """Get or initialize the vector database"""
+    global vectordb
+    if vectordb is None:
+        vectordb = Chroma(
+            persist_directory=CHROMA_DIR,
+            embedding_function=embeddings,
+        )
+    return vectordb
+
+vectordb  = get_vectordb()                      
+retriever = vectordb.as_retriever(               
+    search_type="similarity",
+    search_kwargs={"k": 5},
+)
+
+memory = ConversationBufferMemory(
+    memory_key="chat_history",
+    return_messages=True,
+    output_key="answer"
+)
+
+qa_chain = ConversationalRetrievalChain.from_llm(
+    llm = OllamaLLM(
+        model="llama3.2-vision:latest",
+        n_predict=1024,           
+        temperature=0.1,
+        keep_alive="-1s"          
+    ),
+    retriever = retriever,
+    memory = memory,
+    chain_type = "stuff",
+    combine_docs_chain_kwargs = {"prompt": prompt},
+    return_source_documents = True,
+)
 
 @chat_bp.route('/', methods=['GET'])
 def home():
@@ -49,49 +89,36 @@ def home():
 
 @chat_bp.route('/', methods=['POST'])
 def chat():
-    data = request.get_json(force=True)
-    question = data.get("question")
-    retrieved_document = data.get("retrieved document")
+    data        = request.get_json(force=True)
+    question    = data.get("question")
+    doc_filter  = data.get("retrieved document")  
+    convo_id = data.get("convo_id",1) 
+    user_name = data.get("user_name", "shubham")
+
     if not question:
         return jsonify({"error": "`user query` is required"}), 400
-    
-    vectordb = Chroma(
-        persist_directory=CHROMA_DIR,
-        embedding_function=embeddings,
-    )
 
-    search_kwargs = {"k": 8}
-    if retrieved_document:
-        search_kwargs["filter"] = {"source": retrieved_document}
 
-    base_retriever = vectordb.as_retriever(
-        search_type="similarity",
-        search_kwargs=search_kwargs,
-    )
-    
-    multi_query_retriever = MultiQueryRetriever.from_llm(
-        retriever=base_retriever,
-        llm=llm,
-        include_original=True,  # keep the original query as well
-        # generate 4 paraphrased queries
-    )    
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key='answer'  
-    )
+    if doc_filter:
+        retriever.search_kwargs["filter"] = {"source": doc_filter}
+    else:
+        retriever.search_kwargs.pop("filter", None)
 
-    qa = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=multi_query_retriever,
-        memory=memory,
-        chain_type="stuff",               
-        combine_docs_chain_kwargs={"prompt": prompt},
-        return_source_documents=True,
-    )
+    result = qa_chain({"question": question})
 
-    
-    result = qa({"question": question})
+    if convo_id:  # If a conversation ID was provided
+        conversation_record = ConversationHistory(
+            convo_id=convo_id,
+            human_message=question,
+            ai_message=result["answer"],
+            user_name=user_name,
+            request_datetime=datetime.utcnow(),
+            response_datetime=datetime.utcnow()
+        )
+        
+        # Add and commit the record to the database
+        db.session.add(conversation_record)
+        db.session.commit()
     
     chat_history = []
     if "chat_history" in result:

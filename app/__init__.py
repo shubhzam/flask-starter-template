@@ -1,6 +1,6 @@
 from flask import Flask
 from app.config import Config
-from app.extensions import cors #db, migrate,
+from app.extensions import cors, db, migrate
 from app.errors import register_error_handlers
 from app.routes.vectordb import vectordb_bp
 from app.routes.chat import chat_bp
@@ -10,8 +10,8 @@ def create_app(config_class=Config):
     app.config.from_object(config_class)
 
     # Initialize extensions
-    # db.init_app(app)
-    # migrate.init_app(app, db)
+    db.init_app(app)
+    migrate.init_app(app, db)
     cors.init_app(app)
 
     # Register blueprints & error handlers
